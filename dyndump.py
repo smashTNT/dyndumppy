@@ -171,6 +171,7 @@ class DynDump:
         self.exclude = exclude or ["webresources", "audits"]
         self.threads = threads
         self.systemuser_id = None
+        self.entity_map = {}  # Add this: LogicalName -> EntitySetName mapping
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -253,10 +254,18 @@ class DynDump:
                 )
                 return
             
-            # Construct the download URL
+            # Map objecttypecode (LogicalName) to EntitySetName
+            entity_set_name = self.entity_map.get(objecttypecode)
+            if not entity_set_name:
+                logging.warning(
+                    f"Unknown objecttypecode '{objecttypecode}' for file {filename}"
+                )
+                return
+            
+            # Construct the download URL using the correct EntitySetName
             download_url = (
                 f"{self.client.target}{API_ENDPOINT}{self.client.api_version}/"
-                f"{objecttypecode}({objectid_value})/{regardingfieldname}/$value"
+                f"{entity_set_name}({objectid_value})/{regardingfieldname}/$value"
             )
             
             # Generate deduplicated filename
@@ -335,6 +344,13 @@ class DynDump:
 
         # Get entity definitions
         definitions = self.get_entity_definitions()
+        
+        # Build mapping from LogicalName to EntitySetName
+        self.entity_map = {
+            d["LogicalName"]: d["EntitySetName"] 
+            for d in definitions
+        }
+        logging.debug(f"Built entity map with {len(self.entity_map)} entries")
 
         # Filter definitions based on include/exclude
         filtered_definitions = [

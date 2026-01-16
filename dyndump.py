@@ -144,6 +144,15 @@ class DynamicsClient:
 
         return entity_set
 
+    def download_file(self, url: str, output_path: Path) -> None:
+        """Download a file from a URL to the specified path"""
+        response = self.session.get(url, stream=True, timeout=30)
+        response.raise_for_status()
+        
+        with open(output_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
 
 class DynDump:
     """Microsoft Dynamics CRM dumper"""
@@ -200,6 +209,71 @@ class DynDump:
         definitions_set = self.client.get_entity_set("EntityDefinitions")
         return definitions_set["value"]
 
+    def get_unique_filename(self, directory: Path, objecttypecode: str, original_filename: str) -> str:
+        """
+        Generate a unique filename with objecttypecode prefix and (num) suffix if needed.
+        Preserves file extension.
+        """
+        # Split filename and extension
+        name_parts = original_filename.rsplit('.', 1)
+        if len(name_parts) == 2:
+            base_name, extension = name_parts
+            extension = f".{extension}"
+        else:
+            base_name = original_filename
+            extension = ""
+        
+        # Construct prefixed filename
+        prefixed_name = f"{objecttypecode}_{base_name}{extension}"
+        
+        # Check for conflicts and add (num) if needed
+        if not (directory / prefixed_name).exists():
+            return prefixed_name
+        
+        counter = 1
+        while True:
+            new_name = f"{objecttypecode}_{base_name}({counter}){extension}"
+            if not (directory / new_name).exists():
+                return new_name
+            counter += 1
+
+    def handle_fileattachment(self, record: Dict[str, Any], files_dir: Path) -> None:
+        """Handle fileattachment records by downloading the actual file"""
+        try:
+            # Extract required fields
+            objecttypecode = record.get('objecttypecode')
+            objectid_value = record.get('_objectid_value')
+            regardingfieldname = record.get('regardingfieldname')
+            filename = record.get('filename')
+            
+            # Validate required fields
+            if not all([objecttypecode, objectid_value, regardingfieldname, filename]):
+                logging.warning(
+                    f"Missing required fields in fileattachment: {record.get('fileattachmentid')}"
+                )
+                return
+            
+            # Construct the download URL
+            download_url = (
+                f"{self.client.target}{API_ENDPOINT}{self.client.api_version}/"
+                f"{objecttypecode}({objectid_value})/{regardingfieldname}/$value"
+            )
+            
+            # Generate deduplicated filename
+            safe_filename = self.get_unique_filename(files_dir, objecttypecode, filename)
+            output_path = files_dir / safe_filename
+            
+            # Download the file
+            logging.debug(f"Downloading: {filename} -> {safe_filename}")
+            self.client.download_file(download_url, output_path)
+            
+            logging.info(f"Downloaded file: {safe_filename}")
+            
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"Error downloading {filename}: {e}")
+        except Exception as e:
+            logging.warning(f"Unexpected error processing {filename}: {e}")
+
     def dump_entity_set(self, definition: Dict[str, Any]) -> None:
         """Dump a single entity set to file"""
         entity_set_name = definition["EntitySetName"]
@@ -211,6 +285,15 @@ class DynDump:
             logging.info(
                 f"dumped entityset {entity_set_name} [count={len(entity_set['value'])}]"
             )
+
+            # Special handling for fileattachments
+            if entity_set_name == "fileattachments":
+                files_dir = self.output_dir / "files"
+                files_dir.mkdir(parents=True, exist_ok=True)
+                
+                logging.info(f"Processing {len(entity_set['value'])} file attachments...")
+                for record in entity_set["value"]:
+                    self.handle_fileattachment(record, files_dir)
 
             # Try to get access info for the first record
             if entity_set["value"] and self.systemuser_id:
